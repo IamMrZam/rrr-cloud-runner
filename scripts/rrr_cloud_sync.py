@@ -23,6 +23,7 @@ FILES = (
     "fired.json",
     "printify_drop_state.json",
     "voice_settings.json",
+    "unlimited_post_queue.json",
 )
 
 
