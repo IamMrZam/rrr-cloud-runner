@@ -294,62 +294,91 @@ def _voice_cfg() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _edge_voice(cfg: dict) -> str:
-    saved = str(cfg.get("voice") or "").strip()
-    accent = str(cfg.get("accent") or "").lower()
+_RANDOM_ACCENT_VOICES = (
+    ("irish", "en-IE-ConnorNeural", "en-IE-EmilyNeural"),
+    ("british", "en-GB-RyanNeural", "en-GB-SoniaNeural"),
+    ("australian", "en-AU-WilliamNeural", "en-AU-NatashaNeural"),
+    ("southern", "en-US-JasonNeural", "en-US-JennyNeural"),
+    ("canadian", "en-CA-LiamNeural", "en-CA-ClaraNeural"),
+    ("indian", "en-IN-PrabhatNeural", "en-IN-NeerjaNeural"),
+    ("new_york", "en-US-GuyNeural", "en-US-AriaNeural"),
+    ("kiwi", "en-NZ-MitchellNeural", "en-NZ-MollyNeural"),
+)
+
+
+def _edge_voice(cfg: dict, *, slot: dict | None = None, clock: dict | None = None) -> str:
     gender = str(cfg.get("gender") or "").lower()
-    persona = str(cfg.get("personality") or "").lower()
     female = gender in ("female", "woman", "girl")
-    humor = str(cfg.get("humor") or "").lower()
-    if "british" in accent or "british" in persona or "cockney" in persona or humor == "dry":
-        return "en-GB-SoniaNeural" if female else "en-GB-RyanNeural"
-    if "southern" in accent:
-        return "en-US-JennyNeural" if female else "en-US-JasonNeural"
-    if "irish" in accent:
-        return "en-IE-EmilyNeural" if female else "en-IE-ConnorNeural"
-    if "australian" in accent or "aussie" in accent:
-        return "en-AU-NatashaNeural" if female else "en-AU-WilliamNeural"
-    if "latin" in accent or "spanish" in accent:
-        return "en-US-JennyNeural" if female else "en-US-TonyNeural"
-    if saved.startswith("en-"):
-        return saved
-    return "en-US-JennyNeural" if female else "en-US-GuyNeural"
+    idx = _rotate_index(
+        (clock or {}).get("date"),
+        (slot or {}).get("id"),
+        (slot or {}).get("platform"),
+        (slot or {}).get("post_type"),
+        "accent",
+        size=len(_RANDOM_ACCENT_VOICES),
+    )
+    _name, male_v, female_v = _RANDOM_ACCENT_VOICES[idx]
+    cfg["accent"] = _name
+    return female_v if female else male_v
 
 
-def _humor_script(product: dict, cfg: dict, seconds: int, *, humor: str = "") -> str:
+def _humor_script(
+    product: dict,
+    cfg: dict,
+    seconds: int,
+    *,
+    humor: str = "",
+    slot: dict | None = None,
+    clock: dict | None = None,
+) -> str:
     title = str(product.get("product_title") or "this design")
     title = re.sub(r"\s*[|\-—].*$", "", title).strip() or "this design"
     persona = str(humor or cfg.get("personality") or cfg.get("humor") or "").lower()
-    accent = str(cfg.get("accent") or "").lower()
-    cuss = str(cfg.get("cussing") or "mild").lower()
-    hard = cuss in ("heavy", "on", "wild", "max") and "off" not in cuss
-    scripts = {
-        "dark_humor": f"Dark comedy drop. {title}. Laugh first, checkout second. reallyraisedrough.com",
-        "prison_humor": f"Yard-comedy energy. {title}. Clean living, loud fit. Order now. reallyraisedrough.com",
-        "recovery_dark": f"Still clean, still sarcastic. {title}. No lectures. Tap ORDER NOW. reallyraisedrough.com",
-        "past_chaos": f"We joke about the wreckage. {title}. Shop the proof. reallyraisedrough.com",
-        "enforcer": f"Listen up. {title}. No soft merch. Pick size, color, checkout. reallyraisedrough.com",
-        "wiseguy": f"Real talk. {title}. Same joke, different fit. ORDER NOW. reallyraisedrough.com",
-        "dry": f"Right then. {title}. A bit rude, properly raised rough. Order now. reallyraisedrough.com",
-        "deadpan": f"{title}. Funny merch. No kumbaya. Checkout at reallyraisedrough.com",
-        "heartfelt": f"{title}. Honest merch for people who stayed. Shop reallyraisedrough.com",
-        "sarcastic": f"Congrats on surviving yourself. {title}. Here's the shirt. reallyraisedrough.com",
-    }
-    if any(tag in persona for tag in ("capone", "gotti", "dark_boss")):
-        persona = "enforcer"
-    if "british" in accent and persona not in scripts:
-        persona = "dry"
-    script = scripts.get(persona) or scripts["dark_humor"]
+    openers = (
+        f"Listen. {title}.",
+        f"Real talk. {title}.",
+        f"Don't scroll. {title}.",
+        f"This one's loud. {title}.",
+        f"Still here. Still shopping. {title}.",
+        f"Laugh first. {title}.",
+        f"No lecture. {title}.",
+        f"Yard energy. {title}.",
+    )
+    middles = (
+        "Unique drop. Same store.",
+        "Pick size and color.",
+        "The mockup is the proof.",
+        "Wear the joke. Skip the meeting.",
+        "Checkout takes a minute.",
+        "Attitude printed. Lectures not included.",
+        "For people who stayed.",
+        "Rough honesty. Clean living.",
+    )
+    ctas = (
+        "Order now at reallyraisedrough.com",
+        "Tap ORDER NOW. reallyraisedrough.com",
+        "Shop the store. reallyraisedrough.com",
+        "Size, color, address, checkout. reallyraisedrough.com",
+        "Link in the post. reallyraisedrough.com",
+    )
+    idx = _rotate_index(
+        (clock or {}).get("date"),
+        (clock or {}).get("iso"),
+        (slot or {}).get("id"),
+        (slot or {}).get("platform"),
+        (slot or {}).get("post_type"),
+        persona,
+        title,
+        size=max(len(openers), len(middles), len(ctas)) * 17,
+    )
+    script = f"{openers[idx % len(openers)]} {middles[idx % len(middles)]} {ctas[idx % len(ctas)]}"
     if seconds <= 20:
-        script = f"{title}. {HUMOR_HOOKS.get(persona, HUMOR_HOOKS['dark_humor'])} Order now. reallyraisedrough.com"
-    if not hard:
-        for a, b in (("fucking", "damn"), ("shit", "stuff"), ("asshole", "fool")):
-            script = re.sub(rf"\b{a}\b", b, script, flags=re.I)
+        script = f"{openers[idx % len(openers)]} {ctas[idx % len(ctas)]}"
     return re.sub(r"\s+", " ", script).strip()
 
 
-def _tts_mp3(text: str, dest: Path, cfg: dict) -> Path | None:
-    voice = _edge_voice(cfg)
+def _tts_mp3(text: str, dest: Path, cfg: dict, *, slot: dict | None = None, clock: dict | None = None) -> Path | None:
+    voice = _edge_voice(cfg, slot=slot, clock=clock)
     rate = str(cfg.get("rate") or "+0%").strip() or "+0%"
     pitch = str(cfg.get("pitch") or "+0Hz").strip() or "+0Hz"
     if pitch.endswith("%") and "Hz" not in pitch:
@@ -1052,8 +1081,8 @@ def execute_slot(slot: dict, pack: dict, work: Path, clock: dict | None = None) 
             cfg = dict(_voice_cfg())
             cfg["humor"] = humor
             cfg["personality"] = humor
-            script = _humor_script(product, cfg, seconds, humor=humor)
-            audio = _tts_mp3(script, work / "vo.mp3", cfg)
+            script = _humor_script(product, cfg, seconds, humor=humor, slot=slot, clock=clock)
+            audio = _tts_mp3(script, work / "vo.mp3", cfg, slot=slot, clock=clock)
             video_path = _make_video(image_path, work / "post.mp4", seconds, audio)
         if plat == "youtube" and not video_path:
             return "skipped_no_ffmpeg"
