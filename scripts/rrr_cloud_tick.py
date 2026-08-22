@@ -45,6 +45,18 @@ TZ_NAME = os.getenv("RRR_TIMEZONE") or "America/Phoenix"
 DRY = (os.getenv("RRR_DRY_RUN") or "").strip().lower() in ("1", "true", "yes", "on")
 MAX_DUE = 12
 _PRODUCT_RE = re.compile(r"/product/(\d+)(?:/([^/?#\s]+))?", re.I)
+QUEUE_CATALOG = (
+    ("facebook", "image"),
+    ("facebook", "reel"),
+    ("instagram", "image"),
+    ("instagram", "reel"),
+    ("threads", "image"),
+    ("youtube", "short"),
+    ("youtube", "video"),
+    ("x", "image"),
+    ("x", "video"),
+    ("telegram", "image"),
+)
 
 PLATFORMS = (
     "facebook",
@@ -174,6 +186,98 @@ def due_slots(pack: dict, fired: dict, clock: dict) -> list[dict]:
             continue
         out.append(slot)
     return out[:MAX_DUE]
+
+
+def queue_on(pack: dict) -> bool:
+    """Nothing saved in Start Jarvis still means the unlimited queue is ON."""
+    sched = pack.get("schedule") or {}
+    if sched.get("stopped_by_user") or sched.get("master_enabled") is False:
+        return False
+    q = pack.get("queue")
+    if not isinstance(q, dict):
+        return True
+    if q.get("enabled") is False:
+        return False
+    return True
+
+
+def _new_queue_job(*, created: int = 0, design_every: int = 6) -> dict:
+    plat, ptype = random.choice(QUEUE_CATALOG)
+    video = ptype in VIDEO_TYPES
+    kind = "design" if created and created % max(1, design_every) == 0 else "post"
+    return {
+        "id": hashlib.sha1(f"{time.time_ns()}-{random.random()}".encode()).hexdigest()[:12],
+        "kind": kind,
+        "platform": plat,
+        "post_type": ptype,
+        "accent": "random",
+        "persona": "random",
+        "style": "random",
+        "duration": "random",
+        "voiceover": "on" if video else "random",
+        "batch": "unlimited-queue",
+    }
+
+
+def drain_pack_queue(pack: dict, *, n: int | None = None) -> list[dict]:
+    """Refill random jobs when the queue is empty so posting never runs out."""
+    if not queue_on(pack):
+        return []
+    q = pack.get("queue") if isinstance(pack.get("queue"), dict) else {}
+    pending = [j for j in (q.get("pending") or []) if isinstance(j, dict)]
+    try:
+        max_n = max(1, min(12, int(n if n is not None else q.get("max_per_tick") or 3)))
+    except (TypeError, ValueError):
+        max_n = 3
+    try:
+        design_every = max(1, min(40, int(q.get("design_every") or 6)))
+    except (TypeError, ValueError):
+        design_every = 6
+    created = int(q.get("created") or 0)
+    while len(pending) < 24:
+        created += 1
+        pending.append(_new_queue_job(created=created, design_every=design_every))
+    jobs = pending[:max_n]
+    q["pending"] = pending[max_n:]
+    q["created"] = created
+    q["enabled"] = True
+    q["controls"] = "Start Jarvis"
+    pack["queue"] = q
+    return jobs
+
+
+def execute_queue_job(job: dict, pack: dict, work: Path, clock: dict) -> str:
+    kind = str(job.get("kind") or "post").lower()
+    if kind == "design":
+        try:
+            import rrr_cloud_printify
+
+            drop = rrr_cloud_printify._drop_one(kind_mode="queue", new_art=True)
+            if drop.get("ok"):
+                try:
+                    rrr_cloud_printify.sync_mockups_into_pack()
+                except Exception:
+                    pass
+                return "ok:printify_design"
+            return f"failed:{drop.get('error') or 'design'}"[:160]
+        except Exception as exc:
+            return f"failed:{exc}"[:160]
+    slot = {
+        "id": job.get("id") or "queue",
+        "platform": job.get("platform") or "facebook",
+        "post_type": job.get("post_type") or "image",
+        "enabled": True,
+        "accent": job.get("accent") or "random",
+        "persona": job.get("persona") or "random",
+        "style": job.get("style") or "random",
+        "duration": job.get("duration") or "random",
+        "voiceover": job.get("voiceover") or "on",
+        "batch": "unlimited-queue",
+    }
+    plat = str(slot["platform"]).lower()
+    if not _platform_ready(plat):
+        return "skipped_platform_not_ready"
+    return execute_slot(slot, pack, work, clock)
 
 
 def checkout_url(raw: str) -> str:
@@ -1154,6 +1258,19 @@ def run() -> dict:
     else:
         claimed = due
         from rrr_slot_lock import HOST_ID, finish  # noqa: F401
+    qjobs = drain_pack_queue(pack)
+    claimed_q: list[tuple[str, dict]] = []
+    if not DRY:
+        from rrr_slot_lock import claim as _qclaim
+
+        for job in qjobs:
+            qkey = f"{clock['date']}-queue-{job.get('id') or 'x'}"
+            if _qclaim(fired, qkey, now_iso=clock["iso"]):
+                claimed_q.append((qkey, job))
+        if claimed_q:
+            _save(FIRED_PATH, fired)
+    else:
+        claimed_q = [(f"dry-queue-{j.get('id')}", j) for j in qjobs]
     with tempfile.TemporaryDirectory(prefix="rrr-cloud-") as tmp:
         work = Path(tmp)
         for slot in claimed:
@@ -1187,22 +1304,63 @@ def run() -> dict:
                     "result": result,
                 }
             )
-    if claimed and not DRY:
-        _save(PACK_PATH, pack)
+        for qkey, job in claimed_q:
+            humor = humor_for(job, clock)
+            result = execute_queue_job(job, pack, work, clock)
+            plat = str(job.get("platform") or "").lower()
+            if DRY:
+                results.append(
+                    {
+                        "id": job.get("id"),
+                        "platform": plat,
+                        "post_type": job.get("post_type"),
+                        "kind": job.get("kind"),
+                        "source": "unlimited-queue",
+                        "result": result,
+                    }
+                )
+                continue
+            from rrr_slot_lock import finish as _qfinish
+
+            _qfinish(
+                fired,
+                qkey,
+                result,
+                now_iso=clock["iso"],
+                extra={"platform": plat, "humor": humor, "source": "unlimited-queue"},
+            )
+            results.append(
+                {
+                    "id": job.get("id"),
+                    "platform": plat,
+                    "post_type": job.get("post_type"),
+                    "kind": job.get("kind"),
+                    "humor": humor,
+                    "source": "unlimited-queue",
+                    "host": os.getenv("RRR_HOST_ID") or "cloud",
+                    "result": result,
+                }
+            )
     if not DRY:
+        _save(PACK_PATH, pack)
         _save(FIRED_PATH, fired)
+    qstate = pack.get("queue") if isinstance(pack.get("queue"), dict) else {}
     summary = {
         "ok": True,
         "at": clock["iso"],
         "tz": TZ_NAME,
         "due": len(due),
         "claimed": len(claimed),
+        "queue_claimed": len(claimed_q),
+        "queue_pending": len(qstate.get("pending") or []),
+        "queue_on": queue_on(pack),
         "host": os.getenv("RRR_HOST_ID") or "cloud",
         "results": results,
         "identity": IDENTITY,
         "laptop_required": False,
         "platforms": list(PLATFORMS),
         "x_mode": "oauth1_free",
+        "controls": "Start Jarvis",
         "dry": DRY,
     }
     print(json.dumps(summary, indent=2))
