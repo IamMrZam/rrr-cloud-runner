@@ -1,4 +1,4 @@
-"""Cloud Printify: daily shirt/hoodie/mug designs + mockups for posts.
+"""Cloud Printify: used-prompt / related products + mockups for posts.
 
 Runs on GitHub Actions. Uses PRINTIFY_API_TOKEN / PRINTIFY_SHOP_ID.
 Never prints tokens. Updates pack.json pool with live mockups.
